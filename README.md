@@ -1,8 +1,8 @@
 # Token Radar — pre-token protocols ranked by implied value
 
-[![make.fun](https://make.fun/badge/token-radar-01.svg)](https://make.fun)
-[![make.fun rank](https://make.fun/badge/token-radar-01/silver-finch-59/token-radar-01/rank.svg)](https://make.fun)
-[![make.fun reward](https://make.fun/badge/token-radar-01/reward.svg)](https://make.fun)
+[![make.fun · token-radar-01](https://make.fun/badge/token-radar-01.svg)](https://make.fun/bounty/token-radar-01?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
+[![rank](https://make.fun/badge/token-radar-01/silver-finch-59/token-radar-01/rank.svg)](https://make.fun/bounty/token-radar-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
+[![reward](https://make.fun/badge/token-radar-01/silver-finch-59/token-radar-01/reward.svg)](https://make.fun/bounty/token-radar-01?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
 
 A token launch radar for the [make.fun](https://make.fun) token-radar-01 bounty: it reads a
 sealed DefiLlama snapshot of 758 protocols, ranks the 198 pre-token protocols that could still
