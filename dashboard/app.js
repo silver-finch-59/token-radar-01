@@ -1,8 +1,9 @@
-// Token Radar (radar-2): a plain dashboard that reads window.RADAR (written beside dashboard/
+// Token Radar (radar-3): a plain dashboard that reads window.RADAR (written beside dashboard/
 // by main.ts) and renders the ranked board, a filterable table, and a per-protocol detail drawer
 // with the model's own inputs and the protocol's farm plan. No network: every byte it shows is
-// in data.js. The page recomputes every row from the snapshot figures, so the code and the board's
-// data are visibly the same arithmetic.
+// in data.js. The page recomputes every row from the snapshot figures and the fitted size curve,
+// so the code and the board's data are visibly the same arithmetic, and it prints the model's
+// own out-of-sample test beside the board instead of asking the reader to trust it.
 (function () {
   'use strict';
 
@@ -30,9 +31,10 @@
   }
   function fmtMult(n) { return (Math.round(n * 100) / 100).toFixed(2) + 'x'; }
 
-  // radar-2, the same function lib/model.ts scores with. Base uses diminishing returns on TVL;
-  // maturity is a ripe window that peaks at two years with no token and then eases back; niche
-  // compares the protocol's TVL with its own category's median.
+  // radar-3, the same function lib/model.ts scores with. The base is the size curve fitted to
+  // the snapshot's own traded tokens: 10^(intercept + slope x log10(TVL)). Maturity is a ripe
+  // window that peaks at two years with no token and then eases back; niche compares the
+  // protocol's TVL with its own category's median.
   function maturityOf(age, model) {
     var a = age === null || age === undefined ? model.unknown_age_days : age;
     if (a <= model.maturity_peak_days) return model.maturity_floor + (1 - model.maturity_floor) * (a / model.maturity_peak_days);
@@ -40,13 +42,14 @@
     return 1 - (1 - model.maturity_decay_to) * (past / model.maturity_decay_days);
   }
   function impliedOf(row, model) {
+    var fit = DATA.fit;
     var growth = Math.min(model.growth_cap, Math.max(model.growth_floor, row.change_7d === null || row.change_7d === undefined ? 0 : row.change_7d));
     var growthMult = 1 + (growth / 100) * model.growth_weight;
     var maturity = maturityOf(row.age_days, model);
     var chainMult = 1 + model.chain_step * Math.min(Math.max((row.chains || []).length - 1, 0), model.chain_max_bonus);
     var median = row.category_median_tvl_usd && row.category_median_tvl_usd > 0 ? row.category_median_tvl_usd : row.tvl_usd;
     var niche = Math.min(model.niche_cap, Math.max(model.niche_floor, 1 + model.niche_step * (Math.log(row.tvl_usd / median) / Math.log(2))));
-    var base = model.base_scale * Math.pow(Math.max(row.tvl_usd, 0), model.base_exponent);
+    var base = Math.pow(10, fit.intercept + fit.slope * Math.log10(Math.max(row.tvl_usd, 1)));
     return Math.max(1, Math.round(base * growthMult * maturity * chainMult * niche));
   }
 
@@ -201,16 +204,21 @@
   function lede() {
     var vals = DATA.rows.map(function (r) { return r.implied_value_usd; }).sort(function (a, b) { return a - b; });
     var median = vals[Math.floor((vals.length - 1) / 2)];
+    var v = DATA.validation;
+    var accounted = DATA.board_size + DATA.live_size + DATA.excluded.total;
     return el('section', { class: 'lede' },
       el('div', null,
         el('h1', { text: DATA.watchlist_size + ' watchlist protocols, ranked by implied value' }),
-        el('p', { text: 'The watchlist is the floor: every protocol with at least $' + Math.round(DATA.floor_usd / 1e6) + 'M of TVL and no token on record. The early radar adds ' + DATA.early_size + ' more pre-token protocols that pass the same exclusion rules, above and below the floor. Implied value is a model, not a promise.' })
+        el('p', { text: 'The watchlist is the floor: every protocol with at least $' + Math.round(DATA.floor_usd / 1e6) + 'M of TVL and no token on record. The early radar adds ' + DATA.early_size + ' more pre-token protocols that pass the same exclusion rules, above and below the floor. Implied value is a model, not a promise. This page accounts for all ' + accounted + ' protocols in the snapshot: ' + DATA.board_size + ' ranked pre-token, ' + DATA.live_size + ' live-token set aside, and ' + DATA.excluded.total + ' pre-token left out as wrapped, staked, bridged, versioned or exchange products.' })
       ),
       el('div', { class: 'facts' },
         el('div', { class: 'fact' }, el('span', { text: 'Watchlist covered' }), el('b', { text: DATA.watchlist_size + ' / ' + DATA.watchlist_size })),
         el('div', { class: 'fact' }, el('span', { text: 'Pre-token rows scored' }), el('b', { text: String(DATA.board_size) })),
         el('div', { class: 'fact' }, el('span', { text: 'Early rows beyond the watchlist' }), el('b', { text: String(DATA.early_size) })),
         el('div', { class: 'fact' }, el('span', { text: 'Median implied value' }), el('b', { text: fmtUsd(median) })),
+        el('div', { class: 'fact' }, el('span', { text: 'Size curve fit (R2)' }), el('b', { text: DATA.fit.r2.toFixed(2) + ' on ' + DATA.fit.n + ' comps' })),
+        el('div', { class: 'fact' }, el('span', { text: 'Out-of-sample median error' }), el('b', { text: v.chosen.median.toFixed(2) + ' vs flat ' + v.flat_multiple.median.toFixed(2) })),
+        el('div', { class: 'fact' }, el('span', { text: 'Protocols accounted for' }), el('b', { text: accounted + ' / ' + DATA.total_protocols })),
         el('div', { class: 'fact' }, el('span', { text: 'Live-token protocols set aside' }), el('b', { text: String(DATA.live_size) }))
       )
     );
@@ -327,7 +335,7 @@
     return el('div', { class: 'panel' },
       el('div', { class: 'table-wrap' },
         el('table', null,
-          el('caption', { class: 'sub', text: 'Token live: these protocols already trade, so their market cap is a fact, not a model. They are set aside from the pre-token ranking.' }),
+          el('caption', { class: 'sub', text: 'Token live: all ' + DATA.live.length + ' protocols whose token already trades, by market cap. Their market cap is a fact, not a model. They are set aside from the pre-token ranking, and the ' + DATA.excluded.total + ' pre-token protocols the board leaves out are wrapped, staked or bridged products (' + DATA.excluded.category + ' by category), versioned pools (' + DATA.excluded.version + '), wrapped or staked names (' + DATA.excluded.wrapped + ') and exchange products (' + DATA.excluded.exchange + ').' }),
           el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Status' }), el('th', { scope: 'col', text: 'Protocol' }), el('th', { scope: 'col', text: 'TVL' }), el('th', { scope: 'col', text: '7d' }), el('th', { scope: 'col', text: 'Market cap' }), el('th', { scope: 'col', text: 'Token' }))),
           tbody
         )
@@ -337,13 +345,53 @@
 
   function modelPanel() {
     var m = DATA.model;
+    var fit = DATA.fit;
     return el('section', { class: 'panel model' },
       el('h2', { text: 'How implied value is computed' }),
-      el('p', { class: 'sub', text: 'Every row is scored by one function of the snapshot figures. No protocol name is special-cased, and no row is hand-picked. Wrapped, staked and bridged products of a token that already trades are left out entirely, because they are not a launch of their own.' }),
+      el('p', { class: 'sub', text: 'Every row is scored by one function of the snapshot figures. The size curve is fitted to the snapshot\u2019s own traded tokens at run time, not hand-picked: log10(market cap) = ' + fit.intercept + ' + ' + fit.slope + ' x log10(TVL), fitted on ' + fit.n + ' traded protocols (R2 ' + fit.r2 + '). No protocol name is special-cased, and no row is hand-picked. Wrapped, staked and bridged products of a token that already trades are left out entirely, because they are not a launch of their own.' }),
       el('div', { class: 'formula' },
-        'implied = round( 5 x tvl_usd^0.8 x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ') x maturity(age) x (1 + 0.02 x min(chains - 1, 5)) x niche )'
+        'implied = round( 10^(' + fit.intercept + ' + ' + fit.slope + ' x log10(tvl_usd)) x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ') x maturity(age) x (1 + 0.02 x min(chains - 1, 5)) x niche )'
       ),
       el('p', { class: 'sub', text: 'Maturity is a ripe window: it rises from ' + m.maturity_floor + ' to 1.00 over the first ' + m.maturity_peak_days + ' days with no token, then eases back to ' + m.maturity_decay_to + ' over the next ' + m.maturity_decay_days + ' days. Niche compares a protocol with the median TVL of its own category, from 0.90 to 1.10. Age is the time since the protocol was first listed; an unlisted age uses ' + m.unknown_age_days + ' days. TVL and seven-day growth come from the snapshot.' })
+    );
+  }
+
+  function factorOf(logErr) { return 'x' + Math.pow(10, logErr).toFixed(1); }
+
+  function validationPanel() {
+    var v = DATA.validation;
+    var fit = DATA.fit;
+    function row(label, err, note) {
+      return el('tr', null,
+        el('td', { text: label }),
+        el('td', { class: 'num', text: err.median.toFixed(3) }),
+        el('td', { class: 'num', text: factorOf(err.median) }),
+        el('td', { class: 'num', text: err.mean.toFixed(3) }),
+        el('td', { text: note })
+      );
+    }
+    return el('section', { class: 'panel model' },
+      el('h2', { text: 'How the model was tested' }),
+      el('p', { class: 'sub', text: 'Leave-one-out on the snapshot\u2019s ' + v.comps + ' traded tokens: refit the size curve without each token, predict the one left out, and measure the error in log10 points against its real market cap. A median error of ' + v.chosen.median.toFixed(2) + ' means the typical prediction lands within ' + factorOf(v.chosen.median) + ' of the real market cap. The test runs at build time, on this snapshot, and the numbers below are its measured result — not a claim.' }),
+      el('div', { class: 'table-wrap' },
+        el('table', null,
+          el('caption', { class: 'sub', text: 'Leave-one-out error predicting traded market caps (log10 points; lower is better).' }),
+          el('thead', null, el('tr', null,
+            el('th', { scope: 'col', text: 'Model' }),
+            el('th', { scope: 'col', text: 'Median error' }),
+            el('th', { scope: 'col', text: 'Typical miss' }),
+            el('th', { scope: 'col', text: 'Mean error' }),
+            el('th', { scope: 'col', text: 'Note' })
+          )),
+          el('tbody', null,
+            row('This model (fitted curve + growth, age, chains, niche)', v.chosen, 'the board\u2019s model'),
+            row('Fitted size curve alone', v.size_only, 'no multipliers'),
+            row('Flat multiple (median mcap / TVL)', v.flat_multiple, 'the naive baseline'),
+            row('This model + category factor', v.family, 'tested and rejected: worse than this model')
+          )
+        )
+      ),
+      el('p', { class: 'sub', text: 'The fitted curve beats the flat multiple by ' + Math.round((1 - v.chosen.median / v.flat_multiple.median) * 100) + '% on the median error, and the multipliers beat the curve alone (' + v.chosen.median.toFixed(3) + ' vs ' + v.size_only.median.toFixed(3) + '). The category factor was tried the same way and dropped because it made the median error worse (' + v.family.median.toFixed(3) + ' vs ' + v.chosen.median.toFixed(3) + '). Market caps vary widely around any size curve (R2 ' + fit.r2 + '), so every implied value on this board is an estimate with a wide band, not a price.' })
     );
   }
 
@@ -406,7 +454,7 @@
     shell.appendChild(lede());
     shell.appendChild(controls());
     shell.appendChild(state.tab === 'pre-token' ? boardTable() : liveTable());
-    if (state.tab === 'pre-token') shell.appendChild(modelPanel());
+    if (state.tab === 'pre-token') { shell.appendChild(modelPanel()); shell.appendChild(validationPanel()); }
     app.appendChild(shell);
     app.setAttribute('aria-busy', 'false');
     if (!dialog.isConnected) app.appendChild(dialog);

@@ -1,4 +1,4 @@
-// Radar-2, the token radar's model: one snapshot of the protocol universe in, one ranked board out.
+// Radar-3, the token radar's model: one snapshot of the protocol universe in, one ranked board out.
 //
 // The board always covers the snapshot's whole watchlist (the floor, never a ceiling), plus every
 // other pre-token protocol that survives the watchlist's own exclusion rules: nothing wrapped,
@@ -7,21 +7,26 @@
 // cap, no CoinGecko id, no symbol. Protocols that already trade are kept apart and shown at the
 // market's own values, never mixed into the ranked board.
 //
-// Implied value comes only from the snapshot's own figures, never from a hand-kept list of names:
+// Implied value comes only from the snapshot's own figures, never from a hand-kept list of names,
+// and never from a hand-picked scale: the size curve is FITTED to the snapshot's own traded
+// tokens, at run time, by ordinary least squares on log10(market cap) against log10(TVL):
 //
-//   base     = 5 * tvl_usd^0.8        (diminishing returns: a $2B protocol is not 400x a $5M one)
-//   growth   = clamp(change_7d, -60, 120), in per cent
-//   growth   = 1 + (growth / 100) * 0.5
-//   maturity = a ripe window on age_days: 0.6 rising to 1.0 across the first 730 days without a
-//              token, then easing back to 0.85 by day 1825. Two years with no token is ripe; five
-//              years with no token has had its chance and passed it up. (age_days unknown: 365)
-//   chain    = 1 + 0.02 * min(chains - 1, 5)   (each extra chain is a little more surface to farm)
-//   niche    = 0.9 + 0.05 * log2(tvl / categoryMedian), clamped to [0.9, 1.1]
-//              (leading its own category is worth more than being a small fish in a big pond)
-//   implied  = max(1, round(base * growth * maturity * chain * niche))
+//   log10(mcap) = intercept + slope * log10(tvl)     (fitted on the traded comps, this snapshot)
+//   base       = 10 ^ (intercept + slope * log10(tvl_usd))
+//   growth     = 1 + clamp(change_7d, -60, 120) / 100 * 0.5
+//   maturity   = a ripe window on age_days: 0.6 rising to 1.0 across the first 730 days without a
+//                token, then easing back to 0.85 by day 1825. Two years with no token is ripe; five
+//                years with no token has had its chance and passed it up. (age_days unknown: 365)
+//   chain      = 1 + 0.02 * min(chains - 1, 5)   (each extra chain is a little more surface to farm)
+//   niche      = 0.9 + 0.05 * log2(tvl / categoryMedian), clamped to [0.9, 1.1]
+//                (leading its own category is worth more than being a small fish in a big pond)
+//   implied    = max(1, round(base * growth * maturity * chain * niche))
 //
-// The numbers above are the house model's, stated in the dashboard and changeable in its sandbox.
-// No protocol name is ever special-cased: one function scores every row.
+// The fit is checked, not trusted: leave-one-out over the traded comps, refitting without each
+// one and predicting the one left out, gives the median error the dashboard prints, beside the
+// same error for a flat multiple (median mcap/TVL times TVL) and for the size curve alone. A
+// category (family) factor was tested the same way and dropped: it made the median error worse,
+// so it is not in the model. No protocol name is ever special-cased: one function scores every row.
 
 const MS_PER_DAY = 86_400_000;
 
@@ -43,27 +48,45 @@ export interface Snapshot {
   protocols: SnapshotProtocol[]; watchlist: string[];
 }
 
-/** The model's constants, as the dashboard states them and the sandbox lets the reader change them. */
+/** The model's constants, as the dashboard states them and the sandbox lets the reader change them.
+ *  The size curve itself is not a constant: it is fitted from the snapshot on every run. */
 export interface ModelConstants {
-  base_scale: number; base_exponent: number; growth_weight: number;
-  growth_floor: number; growth_cap: number; maturity_floor: number;
-  maturity_peak_days: number; maturity_decay_days: number; maturity_decay_to: number;
+  growth_weight: number; growth_floor: number; growth_cap: number;
+  maturity_floor: number; maturity_peak_days: number; maturity_decay_days: number; maturity_decay_to: number;
   unknown_age_days: number; chain_step: number; chain_max_bonus: number;
   niche_step: number; niche_floor: number; niche_cap: number;
 }
 
 export const MODEL: ModelConstants = {
-  base_scale: 5, base_exponent: 0.8, growth_weight: 0.5, growth_floor: -60, growth_cap: 120,
+  growth_weight: 0.5, growth_floor: -60, growth_cap: 120,
   maturity_floor: 0.6, maturity_peak_days: 730, maturity_decay_days: 1095, maturity_decay_to: 0.85,
   unknown_age_days: 365, chain_step: 0.02, chain_max_bonus: 5,
   niche_step: 0.05, niche_floor: 0.9, niche_cap: 1.1,
 };
 
 /** The model's version label: the dashboard names it, and the rules quote it. */
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
 
-/** How many live-token protocols the Live token view carries, ordered by market cap. */
-export const LIVE_ROWS = 24;
+/** The size curve fitted to the traded comps, and the flat multiple it is judged against. */
+export interface CompsFit {
+  n: number; intercept: number; slope: number; r2: number; median_ratio: number;
+}
+
+/** One variant's leave-one-out error, in log10 points: a median error of 0.52 means the typical
+ *  prediction lands within a factor of 10^0.52 (about 3.3x) of the real market cap. */
+export interface LooError { median: number; mean: number; }
+
+/** The out-of-sample test, run at build time: the chosen model against a flat multiple, the size
+ *  curve alone, and the category-factor variant that was tested and dropped. */
+export interface ModelValidation {
+  comps: number;
+  chosen: LooError; size_only: LooError; flat_multiple: LooError; family: LooError;
+}
+
+/** How the snapshot's 758 protocols are accounted for: ranked, live, or excluded with a reason. */
+export interface ExcludedBreakdown {
+  category: number; version: number; wrapped: number; exchange: number; total: number;
+}
 
 /** A usable number, or `fallback` when the value is missing or not finite. */
 function pickNumber(value: unknown, fallback: number): number {
@@ -102,17 +125,85 @@ export function nicheMultiplier(value: number, median: number, model: ModelConst
   return Math.min(model.niche_cap, Math.max(model.niche_floor, 1 + model.niche_step * log2));
 }
 
-/** The base value from TVL alone, before any multiplier, with diminishing returns. */
-export function baseValue(value: number, model: ModelConstants): number {
-  return model.base_scale * Math.pow(Math.max(value, 0), model.base_exponent);
+/** True when a protocol records no token at all. */
+export function isPreToken(entry: SnapshotProtocol): boolean {
+  return entry.mcap_usd === null && entry.gecko_id === null && entry.symbol === null;
 }
 
-/** Every multiplier and the implied value one protocol earns under `model`. */
+/** A traded comp: a protocol whose token trades and carries a market cap over a positive TVL,
+ *  the only records a size curve can be fitted on. */
+export function isComp(entry: SnapshotProtocol): boolean {
+  return !isPreToken(entry) && entry.mcap_usd !== null && entry.mcap_usd > 0 && entry.tvl_usd > 0;
+}
+
+/** The median of a sorted list of numbers (lower middle on an even count, for determinism). */
+function lowerMiddle(sorted: number[]): number {
+  if (sorted.length === 0) return 0;
+  const middle = Math.floor((sorted.length - 1) / 2);
+  return sorted[middle] as number;
+}
+
+/** Four decimals, for the multipliers and fit figures the board prints. */
+function round4dp(value: number): number {
+  return Math.round(value * 10000) / 10000;
+}
+
+/** Ordinary least squares on two equal-length lists: the line y = intercept + slope * x, with R2. */
+function ols(xs: number[], ys: number[]): { intercept: number; slope: number; r2: number } {
+  const n = xs.length;
+  const mx = xs.reduce((a, b) => a + b, 0) / n;
+  const my = ys.reduce((a, b) => a + b, 0) / n;
+  let sxy = 0;
+  let sxx = 0;
+  let sst = 0;
+  for (let i = 0; i < n; i++) {
+    const dx = (xs[i] as number) - mx;
+    const dy = (ys[i] as number) - my;
+    sxy += dx * dy;
+    sxx += dx * dx;
+    sst += dy * dy;
+  }
+  const slope = sxx === 0 ? 0 : sxy / sxx;
+  const intercept = my - slope * mx;
+  let sse = 0;
+  for (let i = 0; i < n; i++) {
+    const err = (ys[i] as number) - (intercept + slope * (xs[i] as number));
+    sse += err * err;
+  }
+  return { intercept, slope, r2: sst === 0 ? 0 : 1 - sse / sst };
+}
+
+/** The size curve, fitted at run time from the snapshot's traded comps. Nothing about the curve
+ *  is a hand-picked constant: the intercept, the slope and the flat multiple all come from the
+ *  snapshot this run reads. */
+export function fitComps(snapshot: Snapshot): CompsFit {
+  const comps = snapshot.protocols.filter(isComp);
+  const xs = comps.map((p) => Math.log10(p.tvl_usd));
+  const ys = comps.map((p) => Math.log10(p.mcap_usd as number));
+  const fit = xs.length >= 2 ? ols(xs, ys) : { intercept: 0, slope: 0, r2: 0 };
+  const ratios = comps.map((p) => (p.mcap_usd as number) / p.tvl_usd).sort((a, b) => a - b);
+  return {
+    n: comps.length,
+    intercept: round4dp(fit.intercept),
+    slope: round4dp(fit.slope),
+    r2: round4dp(fit.r2),
+    median_ratio: round4dp(lowerMiddle(ratios)),
+  };
+}
+
+/** The fitted base value for a TVL, from a fit: the market cap the comps curve expects at that size. */
+export function fittedBase(tvl: number, fit: CompsFit): number {
+  if (!(tvl > 0)) return 1;
+  return Math.pow(10, fit.intercept + fit.slope * Math.log10(tvl));
+}
+
+/** Every multiplier and the implied value one protocol earns under `model` and `fit`. */
 export function impliedValue(
   entry: SnapshotProtocol,
   day: string,
   median: number,
   model: ModelConstants,
+  fit: CompsFit,
 ): { implied: number; base: number; growthPct: number; growthMult: number; maturityMult: number; chainMult: number; nicheMult: number; age: number | null } {
   const age = ageDays(day, entry.listed_at);
   const clipped = Math.min(model.growth_cap, Math.max(model.growth_floor, pickNumber(entry.change_7d, 0)));
@@ -120,7 +211,7 @@ export function impliedValue(
   const maturityMult = maturityMultiplier(age, model);
   const chainMult = chainMultiplier(entry.chains.length, model);
   const nicheMult = nicheMultiplier(entry.tvl_usd, median, model);
-  const base = baseValue(entry.tvl_usd, model);
+  const base = fittedBase(entry.tvl_usd, fit);
   const implied = Math.max(1, Math.round(base * growthMult * maturityMult * chainMult * nicheMult));
   return { implied, base, growthPct: clipped, growthMult, maturityMult, chainMult, nicheMult, age };
 }
@@ -134,21 +225,23 @@ const SKIP_CATEGORIES = new Set(['Bridge', 'Canonical Bridge', 'Liquid Staking',
 /** Exchange names: a product beginning with one belongs to the exchange, not a new protocol. */
 const EXCHANGE_NAMES = ['Binance', 'Coinbase', 'Bybit', 'Kraken', 'Bitget', 'OKX', 'Bitfinex', 'Gemini'];
 
-/** True when a protocol records no token at all. */
-export function isPreToken(entry: SnapshotProtocol): boolean {
-  return entry.mcap_usd === null && entry.gecko_id === null && entry.symbol === null;
+/** The first exclusion rule a pre-token protocol breaks, in the order isRankable applies them,
+ *  or null when it breaks none. Counting by first rule is how the dashboard accounts for every
+ *  protocol the board leaves out. */
+export function exclusionReason(entry: SnapshotProtocol): 'category' | 'version' | 'wrapped' | 'exchange' | null {
+  if (!isPreToken(entry)) return null;
+  if (entry.category !== null && SKIP_CATEGORIES.has(entry.category)) return 'category';
+  if (VERSION_MARK.test(entry.name)) return 'version';
+  if (/\b(wrapped|staked|staking)\b/i.test(entry.name)) return 'wrapped';
+  if (EXCHANGE_NAMES.some((e) => entry.name.startsWith(e))) return 'exchange';
+  return null;
 }
 
 /** Whether the board may rank a protocol: pre-token, not an exchange, not a versioned pool, and
  *  not a wrapped, staked or bridged product of a token that already trades. The watchlist's own
  *  exclusion rule, applied to every candidate rather than only to the floor. */
 export function isRankable(entry: SnapshotProtocol): boolean {
-  if (!isPreToken(entry)) return false;
-  if (entry.category !== null && SKIP_CATEGORIES.has(entry.category)) return false;
-  if (VERSION_MARK.test(entry.name)) return false;
-  if (/\b(wrapped|staked|staking)\b/i.test(entry.name)) return false;
-  if (EXCHANGE_NAMES.some((e) => entry.name.startsWith(e))) return false;
-  return true;
+  return isPreToken(entry) && exclusionReason(entry) === null;
 }
 
 /** A farm step: its action, what it costs, and how long it takes. */
@@ -184,11 +277,13 @@ export interface LiveRow {
   tvl_usd: number; mcap_usd: number | null; change_7d: number | null;
 }
 
-/** Everything the dashboard needs: the board, the live set, and the model behind them. */
+/** Everything the dashboard needs: the board, the live set, the fitted model and its test. */
 export interface RadarData {
   as_of: string; source: string; floor_usd: number; model: ModelConstants; model_version: string;
+  fit: CompsFit; validation: ModelValidation;
   watchlist_size: number; watchlist_slugs: string[];
   board_size: number; early_size: number; live_size: number;
+  excluded: ExcludedBreakdown; total_protocols: number;
   rows: RadarRow[]; live: LiveRow[];
 }
 
@@ -202,18 +297,6 @@ function indexBySlug(protocols: SnapshotProtocol[]): Map<string, SnapshotProtoco
   const index = new Map<string, SnapshotProtocol>();
   for (const entry of protocols) index.set(entry.slug, entry);
   return index;
-}
-
-/** The median of a sorted list of numbers (lower middle on an even count, for determinism). */
-function lowerMiddle(sorted: number[]): number {
-  if (sorted.length === 0) return 0;
-  const middle = Math.floor((sorted.length - 1) / 2);
-  return sorted[middle] as number;
-}
-
-/** Four decimals, for the multipliers the board prints. */
-function round4dp(value: number): number {
-  return Math.round(value * 10000) / 10000;
 }
 
 /** The single strongest driver of a row's rank, in plain words. */
@@ -266,12 +349,12 @@ function mediansByCategory(chosen: Iterable<SnapshotProtocol>): Map<string, numb
 }
 
 /** The protocols the board ranks, strongest first, with ranks 1..n. */
-export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): BoardRow[] {
+export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL, fit: CompsFit = fitComps(snapshot)): BoardRow[] {
   const chosen = gatherCandidates(snapshot);
   const medians = mediansByCategory(chosen.values());
   const scored = [...chosen.values()].map((entry) => {
     const median = medians.get(entry.category ?? 'Other') ?? entry.tvl_usd;
-    const v = impliedValue(entry, snapshot.as_of, median, model);
+    const v = impliedValue(entry, snapshot.as_of, median, model, fit);
     return { entry, median, ...v };
   });
   scored.sort((a, b) => b.implied - a.implied || (a.entry.slug < b.entry.slug ? -1 : a.entry.slug > b.entry.slug ? 1 : 0));
@@ -405,14 +488,92 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
   ];
 }
 
-/** The live-token protocols for the dashboard's Live token view, by market cap. */
+/** The live-token protocols for the dashboard's Live token view: every protocol whose token
+ *  already trades, by market cap, none held back. They are set aside from the pre-token ranking. */
 export function liveRows(snapshot: Snapshot): LiveRow[] {
-  const trading = snapshot.protocols.filter((p) => !isPreToken(p) && p.category !== 'CEX');
+  const trading = snapshot.protocols.filter((p) => !isPreToken(p));
   trading.sort((a, b) => (b.mcap_usd ?? 0) - (a.mcap_usd ?? 0) || b.tvl_usd - a.tvl_usd);
-  return trading.slice(0, LIVE_ROWS).map((p) => ({
+  return trading.map((p) => ({
     slug: p.slug, name: p.name, category: p.category, chains: p.chains,
     tvl_usd: p.tvl_usd, mcap_usd: p.mcap_usd, change_7d: p.change_7d,
   }));
+}
+
+/** How the pre-token protocols the board leaves out break down, by first exclusion rule. */
+export function excludedBreakdown(snapshot: Snapshot): ExcludedBreakdown {
+  const out: ExcludedBreakdown = { category: 0, version: 0, wrapped: 0, exchange: 0, total: 0 };
+  for (const entry of snapshot.protocols) {
+    const reason = exclusionReason(entry);
+    if (reason === null) continue;
+    out[reason] += 1;
+    out.total += 1;
+  }
+  return out;
+}
+
+/** The category factor the validation tests and the model rejects: the category's mean log
+ *  mcap/TVL against the global median, shrunk by how many comps the category holds. */
+function familyFactor(category: string | null, comps: SnapshotProtocol[], excludeSlug: string | null, globalLogRatio: number): number {
+  const vals: number[] = [];
+  for (const c of comps) {
+    if (excludeSlug !== null && c.slug === excludeSlug) continue;
+    if ((c.category ?? 'Other') !== (category ?? 'Other')) continue;
+    if (c.mcap_usd !== null && c.mcap_usd > 0 && c.tvl_usd > 0) vals.push(Math.log10(c.mcap_usd / c.tvl_usd));
+  }
+  if (vals.length === 0) return 1;
+  const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+  const shrink = vals.length / (vals.length + 4);
+  return Math.pow(10, (mean - globalLogRatio) * shrink);
+}
+
+/** The model's out-of-sample test, run at build time on the snapshot's own traded comps.
+ *  Leave-one-out: refit the size curve without each comp, predict the one left out, and take
+ *  the median and mean of the absolute log10 errors. The same is done for the size curve alone,
+ *  for a flat multiple, and for the size curve with a category factor — the variant the test
+ *  rejected. Every number the dashboard prints about the model's accuracy comes from here. */
+export function validateModel(snapshot: Snapshot, model: ModelConstants = MODEL): ModelValidation {
+  const comps = snapshot.protocols.filter(isComp);
+  const n = comps.length;
+  const medians = mediansByCategory(gatherCandidates(snapshot).values());
+  const chosenErr: number[] = [];
+  const sizeErr: number[] = [];
+  const flatErr: number[] = [];
+  const familyErr: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const held = comps[i] as SnapshotProtocol;
+    const rest = comps.filter((_, j) => j !== i);
+    const xs = rest.map((p) => Math.log10(p.tvl_usd));
+    const ys = rest.map((p) => Math.log10(p.mcap_usd as number));
+    const fit = xs.length >= 2 ? ols(xs, ys) : { intercept: 0, slope: 0, r2: 0 };
+    const ratios = rest.map((p) => (p.mcap_usd as number) / p.tvl_usd).sort((a, b) => a - b);
+    const flatRatio = lowerMiddle(ratios);
+    const actual = Math.log10(held.mcap_usd as number);
+    const median = medians.get(held.category ?? 'Other') ?? held.tvl_usd;
+    const v = impliedValue(held, snapshot.as_of, median, model, {
+      n: rest.length, intercept: round4dp(fit.intercept), slope: round4dp(fit.slope), r2: round4dp(fit.r2), median_ratio: round4dp(flatRatio),
+    });
+    const sizeOnly = fittedBase(held.tvl_usd, {
+      n: rest.length, intercept: fit.intercept, slope: fit.slope, r2: fit.r2, median_ratio: flatRatio,
+    });
+    const globalLogRatio = Math.log10(flatRatio);
+    const fam = familyFactor(held.category, comps, held.slug, globalLogRatio);
+    const familyPred = Math.max(1, v.base * fam * v.growthMult * v.maturityMult * v.chainMult * v.nicheMult);
+    chosenErr.push(Math.abs(Math.log10(v.implied) - actual));
+    sizeErr.push(Math.abs(Math.log10(Math.max(1, sizeOnly)) - actual));
+    flatErr.push(Math.abs(Math.log10(Math.max(1, flatRatio * held.tvl_usd)) - actual));
+    familyErr.push(Math.abs(Math.log10(familyPred) - actual));
+  }
+  const summarize = (errs: number[]): LooError => {
+    const sorted = [...errs].sort((a, b) => a - b);
+    return { median: round4dp(lowerMiddle(sorted)), mean: round4dp(errs.reduce((a, b) => a + b, 0) / Math.max(1, errs.length)) };
+  };
+  return {
+    comps: n,
+    chosen: summarize(chosenErr),
+    size_only: summarize(sizeErr),
+    flat_multiple: summarize(flatErr),
+    family: summarize(familyErr),
+  };
 }
 
 /** A board row's compact form for data.js; the farm plan is generated in the page. */
@@ -433,14 +594,17 @@ export function radarRow(row: BoardRow): RadarRow {
 
 /** Everything the dashboard renders, built from the snapshot. */
 export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): { board: BoardRow[]; radar: RadarData } {
-  const board = buildBoard(snapshot, model);
+  const fit = fitComps(snapshot);
+  const board = buildBoard(snapshot, model, fit);
   const live = liveRows(snapshot);
+  const excluded = excludedBreakdown(snapshot);
   const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
   const radar: RadarData = {
     as_of: snapshot.as_of, source: snapshot.source, floor_usd: snapshot.floor_usd,
-    model, model_version: MODEL_VERSION,
+    model, model_version: MODEL_VERSION, fit, validation: validateModel(snapshot, model),
     watchlist_size: snapshot.watchlist.length, watchlist_slugs: snapshot.watchlist,
     board_size: board.length, early_size: early, live_size: live.length,
+    excluded, total_protocols: snapshot.protocols.length,
     rows: board.map(radarRow), live,
   };
   return { board, radar };

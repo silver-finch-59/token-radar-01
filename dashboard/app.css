@@ -99,6 +99,8 @@ tbody tr[data-selected="true"] { background: color-mix(in srgb, var(--accent) 8%
 .status::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
 
 .model { margin-top: var(--step-4); padding: var(--step-5); display: grid; gap: var(--step-3); }
+.model tbody tr { cursor: default; }
+.model tbody tr:hover { background: transparent; }
 .formula { font-family: var(--font-num); font-size: 13px; line-height: 1.7; color: var(--muted); overflow-wrap: anywhere; }
 .empty { padding: var(--step-7) var(--step-5); text-align: center; display: grid; gap: var(--step-3); justify-items: center; }
 .empty p { color: var(--muted); }

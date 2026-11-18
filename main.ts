@@ -4,7 +4,9 @@
 // and the dossier the judge rebuilds from /output. The scoring itself lives
 // in lib/model.ts; this file only wires the command line, the snapshot and
 // the output directory together, then checks the result against the gate
-// before anything is written.
+// before anything is written. Radar-3 fits its size curve to the snapshot's
+// own traded tokens at run time and tests it leave-one-out before it ranks
+// anything, so the numbers the dashboard prints are measured, not asserted.
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts --input ../input/snapshot.json
 // --input takes a snapshot file or the directory that holds snapshot.json
 // (default /input, the sealed mount inside the grader's container).
@@ -105,7 +107,18 @@ const firstLine =
   radar.early_size +
   ' early, ' +
   radar.live_size +
-  ' live set aside)';
+  ' live set aside), fit on ' +
+  radar.fit.n +
+  ' traded comps: log10(mcap) = ' +
+  radar.fit.intercept +
+  ' + ' +
+  radar.fit.slope +
+  ' x log10(tvl), R2 ' +
+  radar.fit.r2 +
+  ', leave-one-out median error ' +
+  radar.validation.chosen.median +
+  ' log points vs flat ' +
+  radar.validation.flat_multiple.median;
 const secondLine =
   'token radar: wrote ' +
   join(outDir, 'board.json') +

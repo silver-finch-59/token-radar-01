@@ -21,20 +21,28 @@ how to farm it.
 - `screenshots/` — three views of the dashboard: the board, a protocol detail, a filtered view.
 - `dossier.json` — built with the kit's vendored `vendor/makefun-board.ts`.
 
-## The model (radar-2)
+## The model (radar-3)
 
 Every row is scored by one function of the snapshot's own figures. No protocol name is
-special-cased.
+special-cased, and the size curve is fitted to the snapshot's own traded tokens at run time —
+never a hand-picked scale.
 
 ```
-implied = round( 5 x tvl_usd^0.8
+implied = round( 10^(intercept + slope x log10(tvl_usd))
                x (1 + clamp(change_7d, -60, 120) / 100 x 0.5)
                x maturity(age_days)
                x (1 + 0.02 x min(chains - 1, 5))
                x niche )
 ```
 
-- **Base** uses diminishing returns on TVL: a $2B protocol is not worth 400x a $5M one.
+On this snapshot the fit is `log10(mcap) = 3.0247 + 0.5223 x log10(TVL)` over 128 traded
+protocols (R2 0.19). The model is tested leave-one-out on those same traded tokens: refit
+without each one, predict the one left out. The median error is 0.517 log points (the typical
+prediction lands within about 3.3x of the real market cap), against 0.703 for a flat
+median-mcap/TVL multiple — a 26% improvement. A category factor was tested the same way and
+dropped: it made the median error worse. The dashboard prints the whole test, numbers included.
+
+- **Base** is the fitted size curve: the market cap the traded comps imply at a protocol's TVL.
 - **Maturity is a ripe window**: it rises from 0.60 to 1.00 over the first 730 days with no
   token, then eases back to 0.85 by day 1825. Two years with no token is ripe; five years
   with no token has had its chance and passed it up.
@@ -46,7 +54,8 @@ implied = round( 5 x tvl_usd^0.8
   are not on the board at all.
 
 The dashboard recomputes every row from the same figures and shows whether its number
-matches `board.json`.
+matches `board.json`. It also accounts for all 758 protocols in the snapshot: 198 ranked
+pre-token, 416 live-token set aside, and 144 pre-token left out with the reason named.
 
 ## Run it
 
